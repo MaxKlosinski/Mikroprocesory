@@ -37,13 +37,13 @@
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 
-// Struktóra buforu kołowego czyli zmienne które będą używane do manipulowania buforem kołowym.
+// Struktura buforu kołowego czyli zmienne które będą używane do manipulowania buforem kołowym.
 /*
  * Ta struktura implementuje logikę bufora kołowego FIFO (FIFO - First-In, First-Out) ta struktura została
- * zaprojektowana dla bufora przechowującego dane odebrane i które mają zostać wysłane. Co mówi o tym typ struktóry
+ * zaprojektowana dla bufora przechowującego dane odebrane i które mają zostać wysłane. Co mówi o tym typ struktury
  * jaki będzie przechowywany.
  *
- * Gdzie ta struktóra jest użyta:
+ * Gdzie ta struktura jest użyta:
  * 	- rx_circular_buffer -> Bufor do którego przerwanie UART HAL_UART_RxCpltCallback zapisuje każdy przychodzący bajt.
  * 	Pętla główna (`main`) odczytuje z niego dane w celu parsowania ramek.
  *
@@ -51,7 +51,7 @@
  * 	odpowiedzi tekstowe. Mechanizm transmisji ProcessTxBuffer pobiera z niego dane, aby utworzyć i wysłać
  * 	kompletne ramki zgodne z zasadami mojego protokołu komunikacyjnego.
  *
- * 	- Pozostałe pufory kołowe (decoded_data_circ_buff, encoded_data_circ_buff czy history_circular_buffer)
+ * 	- Pozostałe bufory kołowe (decoded_data_circ_buff, encoded_data_circ_buff czy history_circular_buffer)
  * 	Są używane jako tymczasowe magazyny podczas procesów kodowania/dekodowania czy przechowywania danych archiwalnych.
  */
 typedef struct {
@@ -60,12 +60,12 @@ typedef struct {
 	 * Wskazuje indeks w `dataArray`, pod którym zostanie umieszczony następny bajt.
 	 * Jego pozycja względem `tail` określa, ile danych znajduje się w buforze kołowym.
 	 */
-    int head;
+    volatile int head;
     /*
      * Wskazuje indeks najstarszego, nieprzeczytanego bajtu w buforze.
      * Gdy `tail` dogania `head`, bufor staje się pusty.
      */
-    int tail;
+    volatile int tail;
     /*
      * Przechowuje całkowitą pojemność tablicy `dataArray`. Jest kluczowy dla operacji modulo (`%`), która
      * implementuje "zawijanie się" indeksów `head` i `tail`.
@@ -127,11 +127,11 @@ typedef struct {
 
 // -------------------------W dokumentacji------------------góra
 
-// Struktóra buforu kołowego dla danych archiwalnych
+// Struktura buforu kołowego dla danych archiwalnych
 typedef struct {
 	Measurement_t * const dataArray; 	// wskaźnik na tablicę danych
-    int head;					// indeks miejsca, gdzie zapisujemy nowy znak
-    int tail;					// indeks miejsca, skąd odczytujemy znak
+    volatile int head;					// indeks miejsca, gdzie zapisujemy nowy znak
+    volatile int tail;					// indeks miejsca, skąd odczytujemy znak
     int size;					// rozmiar bufora
 } CircularBuffer_arch;
 
@@ -178,7 +178,7 @@ typedef enum {
 // Aktualny stan czujnika
 // Zmienna do której będzie zapisywany aktualny stan czujnika. Jest to nam potrzebne bo dzięki tej zmiennej możemy
 // Dynamicznie włączać potrzebny nam stan w różnej części programu a także określać kolejność wykonywanych działań.
-AHT15_State aht15_current_state = AHT15_STATE_IDLE;
+volatile AHT15_State aht15_current_state = AHT15_STATE_IDLE;
 
 // Flaga informująca, czy operacja I2C jest w toku. Ta flaga jest potrzebna ponieważ dzięki temu zyskujemy pewność że
 // Operacje nie będą się wykonywały wtedy kiedy jest wykonywane jakieś działanie co tym samym by spowodowało nadpisywanie
@@ -262,13 +262,13 @@ uint8_t uart_received_char = '0';
 // Zmienna określająca czy funkcja służąca za wysyłanie danych z bufora nadawczego zakończyła nadawanie znaków.
 // Dzienki tej jesteśmy w stanie ustawić by dane wysyłane przez usart wysyłały się po kolei a nie wtedy kiedy
 // program ma dostęp do usart co powodowało by później kołopot z nakładaniem się danych.
-uint8_t tx_in_progress = 0;
+volatile uint8_t tx_in_progress = 0;
 
 // Zmienna przechowująca wszystkie obsługiwane komendy
 uint8_t commends[] = {'!','#','$','%','&','^','*','@'};
 
 // Flaga wskazująca czy tajmer jest aktywny.
-uint8_t frame_timeout_flag = 0;
+volatile uint8_t frame_timeout_flag = 0;
 
 // Flaga któa jest ustawiana na 1 dopiero wtedy kiedy bufor odbiorczy jest przepełniony. Dzięki tej fladze jesteśmy w
 // stanie podjądź odpowiednie działania dla przepełnienia bufora.
@@ -285,7 +285,7 @@ int ArchBufferOccupied(CircularBuffer_arch *buffer) {
         return buffer->head - buffer->tail;
     } else {
 
-    	// Obliczanie zajętości bufora kołowego w momęcie kiedy jest faktycznie zawinięty.
+    // Obliczanie zajętości bufora kołowego w momencie kiedy jest faktycznie zawinięty.
     	// Podany wzór działa w taki sposób że najpierw obliczamy ile jest danych między ogonem a końcem bufora.
     	// Dzięki temu wiemy ile jest danych między ostanią daną a ogonem potem dodajemy do tego głowę i
     	// dzięki temu dodajemy do ilości ogona a końcem bufora ilość danych z głowy bufora.
@@ -338,7 +338,7 @@ int ArchGetData(CircularBuffer_arch *buffer, Measurement_t *data) {
 	data -> temperature = buffer -> dataArray[buffer -> tail].temperature;
 	data -> humidity = buffer -> dataArray[buffer -> tail].humidity;
 
-	// Przesówa wskaźnik na ostatni aktualny element w buforze.
+	// Przesuwa wskaźnik na ostatni aktualny element w buforze.
     buffer->tail = (buffer->tail + 1) % buffer->size;
 
     return 0;
@@ -428,7 +428,7 @@ int CircularBufferGetChar(CircularBuffer_t *buffer, uint8_t *data) {
     // Odczytywanie wartość z bufora
     *data = buffer->dataArray[buffer->tail];
 
-    // Przesówanie wskaźnika ogona na kolejne miejsce albo jego też zawijanie.
+    // Przesuwanie wskaźnika ogona na kolejne miejsce albo jego też zawijanie.
     buffer->tail = (buffer->tail + 1) % buffer->size;
 
     return 0;
@@ -592,7 +592,7 @@ o	Dodajemy dwa znaki =, aby wynikowy ciąg miał długość podzielną przez 4.
 		// Przypadek w którym zostały w tablicy tylko 2 znaki.
 		case 2:
 
-			// Wyłuskiwanie szejściu bitów ze znaków.
+			// Wyłuskiwanie sześciu bitów ze znaków.
 			CircularBufferPutChar(&encoded_data_circ_buff, base64_table[((data[i] & 0x03) << 4) | ((data[i + 1] & 0xF0) >> 4)]);
 
 			// Wyłuskiwanie ostatnich dwóch znaków i wypełnianie znakiem =
@@ -920,6 +920,7 @@ int Base64Decode(uint8_t* data, int data_sz) {
 	 *  będzie miało wartość 1 itd.
 	 */
 	uint8_t reverse_table[256];
+    memset(reverse_table, 0, sizeof(reverse_table));
 
 	for (int i = 0; i < 64; i++) {
 		/*
@@ -1548,8 +1549,18 @@ void ProcessArchiveTransmission() {
 
             	// Sformułowanie jednej linii do bufora tymczasowego by następnie go wysłać.
             	// Używam funkcji snprintf by przeformatować liczbę na znaki i przekomiować do mojej zmiennej.
-            	size_to_sent = snprintf(temp_line_buffer, sizeof(temp_line_buffer),"Pomiar %d: T=%.2f; H=%.2f",
+		int written = snprintf(temp_line_buffer, sizeof(temp_line_buffer),"Pomiar %d: T=%.2f; H=%.2f",
             			archive_state.start_index, tempData.temperature, tempData.humidity);
+
+		if (written < 0) {
+			// Błąd kodowania
+			size_to_sent = 0;
+		} else if (written >= sizeof(temp_line_buffer)) {
+			// Truncation
+			size_to_sent = sizeof(temp_line_buffer) - 1;
+		} else {
+			size_to_sent = (uint8_t)written;
+		}
 
                 // Sprawdź, czy dodanie nowej linii przekroczy maksymalny rozmiar danych dla JEDNEJ ramki.
                 if (cargo_len + size_to_sent > SIZE_OF_DANE) {
@@ -1587,7 +1598,9 @@ void ProcessArchiveTransmission() {
                  * przesunięty o wartość cargo_len. Jest to zrobione w tym celu aby kopiować dane do wolnych pól
                  * a nie żeby te dane nadpisywać.
                  */
-                memcpy(cargo_buffer + cargo_len, temp_line_buffer, size_to_sent);
+                if (size_to_sent > 0 && (cargo_len + size_to_sent <= SIZE_OF_DANE)) {
+			memcpy(cargo_buffer + cargo_len, temp_line_buffer, size_to_sent);
+                }
                 number_of_current_request++;
 
                 cargo_len += size_to_sent;
@@ -2025,7 +2038,7 @@ int main(void)
 	                	   * 	działa jak odświeżenie "timeru" - przerwanie wystąpi tylko wtedy,
 	                	   * 	gdy przerwa między kolejnymi znakami będzie zbyt długa.
 	                	   */
-	                      if ((frame_content_index + 1) < FRAME_CONTENT_MAX_SIZE) {
+	                      if (frame_content_index < FRAME_CONTENT_MAX_SIZE) {
 	                          frame_content_buffer[frame_content_index++] = ch;
 	                          __HAL_TIM_SET_COUNTER(&htim11, 0);
 	                      } else {
