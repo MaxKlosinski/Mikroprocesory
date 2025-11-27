@@ -1392,7 +1392,7 @@ void AHT15_Process()
     // Tworzenie tablicy w której będą przechowywyane odpowiedzi.
     char response_text[100];
 
-    // Zerowanie całej tablicy by nie znajdywały się tam "śmieci"Test.
+    // Zerowanie całej tablicy by nie znajdywały się tam "śmieci".
     for (int var = 0; var < (sizeof(response_text)/sizeof(response_text[0])); ++var) {
     	response_text[var] = '\0';
 	}
