@@ -88,8 +88,9 @@ typedef enum {
 
 // Rozmiar buforów kołowych
 #define BUF_SIZE_RX 1000	// Rozmiar bufora odbiorczego
-#define BUF_SIZE_TX 1000	// Rozmiar bufora transmisyjnego
+#define BUF_SIZE_TX 3000	// Rozmiar bufora transmisyjnego
 #define HISTORY_BUFFER_SIZE 1000 // Rozmiar bufora na dane archiwalne
+#define SEND_COMMAND 1000 // Rozmiar bufora ilość przyjmowanych użytkowników
 #define SIZE_OF_DANE 99	// Maksymalny rozmiar danych w ramce
 #define CRC_OF_SIZE 4		// Rozmiar pola CRC
 
@@ -141,7 +142,16 @@ typedef struct {
     uint16_t count_total;    // Ile łącznie mamy pobrać
 } ArchiveState;
 
-ArchiveState archive_state;
+// Struktóra buforu kołowego dla odbierania komend odczytu w kolejce
+typedef struct {
+	ArchiveState * const dataArray; 	// wskaźnik na tablicę danych
+    int head;					// indeks miejsca, gdzie zapisujemy nowy znak
+    int tail;					// indeks miejsca, skąd odczytujemy znak
+    int size;					// rozmiar bufora
+} CircularBuffer_request;
+
+// Zmienna przechowująca aktualnie przerabianie zapytanie do pomiaru.
+ArchiveState archive_current_state;
 
 // -------------------------W dokumentacji------------------duł
 
@@ -228,6 +238,7 @@ Measurement_t history_buffer[HISTORY_BUFFER_SIZE]; // Deklaracja bufora na dane 
 uint8_t buffer_TX[BUF_SIZE_TX];				// Bufor wyjściowy (dane do wysłania)
 uint8_t decoded_data_buffer[SIZE_OF_DANE];	// Zdekodowane dane użytkownika
 uint8_t encoded_data_buffer[FRAME_CONTENT_MAX_SIZE];	// Zakodowane dane użytkownika. Odpowiednio zwiększony buffer dla zakodowanych danych.
+ArchiveState request_buffer[SEND_COMMAND];
 
 // Bufor przechowujący zawartość ramki. W pętli głównej.
 uint8_t frame_content_buffer[FRAME_CONTENT_MAX_SIZE];
@@ -239,7 +250,16 @@ uint8_t tx_frame_buffer_data[1000];
 // Inicjalizacja struktur buforów kołowych
 CircularBuffer_t rx_circular_buffer = { buffer_RX, 0, 0, BUF_SIZE_RX };
 CircularBuffer_arch history_circular_buffer = { history_buffer, 0, 0, HISTORY_BUFFER_SIZE };
+CircularBuffer_request request_circular_buffer = { request_buffer, 0, 0, SEND_COMMAND };
+
+/*
+ * Z powodu że mój przesył jest bardzo duży w USART to żeby nie dławić mój program wykonywaniem ciągłych
+ * przerwań by wysłać tylko 1 bajt to będę wysyłał dane w blokach danych. A ta zmienna pod spodem będzie
+ * przechowywała ile bajtów powinienem wysłać.
+ */
+uint16_t tx_bytes_sending = 0;
 CircularBuffer_t tx_circular_buffer = { buffer_TX, 0, 0, BUF_SIZE_TX };
+
 CircularBuffer_t decoded_data_circ_buff = {decoded_data_buffer, 0, 0, SIZE_OF_DANE};
 CircularBuffer_t encoded_data_circ_buff = {encoded_data_buffer, 0, 0, FRAME_CONTENT_MAX_SIZE};
 
@@ -374,6 +394,52 @@ int ArchGetDataAtIndex(CircularBuffer_arch *buffer, int index, Measurement_t *da
 }
 
 // -------------------------W dokumentacji------------------góra
+
+// Funkcja pobierająca zapytania do pobierania komend od czujnika
+int PutQueueRequest(CircularBuffer_request *buffer, uint16_t start_index, uint16_t count_total)
+{
+	ArchiveState temp;
+	temp.count_total = count_total;
+	temp.start_index = start_index;
+
+	// Przypisywanie do zmiennej zwykłej ale nie w zmiennej w buforze tylko w zmiennej następny indeks głowy
+	int next_head = (buffer->head + 1) % buffer->size;
+
+	// Sprawdzanie czy jest miejsce w buforze. Porównuję tutaj następną głowę a nie aktualną głowę z ogonem by odróżnić
+	// sprawdzanie pełnego i pustego bufora bo pusty bufor to taki który AKTUUALNA GŁOWA równa się aktualnemu ogonowi
+	// a pełny gdy NASTĘPNA głowa równa się aktualnemu ogonowi.
+	if ( next_head == buffer->tail ) {
+		return -1;
+	}
+
+    // Wpisywanie wartość do bufora
+    buffer -> dataArray[buffer->head] = temp;
+
+    // Zapisywanie nowy indeks head
+    buffer -> head = next_head;
+
+    return 0;
+
+}
+
+int GetQueueRequest(CircularBuffer_request *buffer, ArchiveState data)
+{
+    // Sprawdzanie czy bufor jest pusty
+    if (buffer->head == buffer->tail) {
+    	return -1;
+    }
+
+    // Odczytywanie wartość z bufora
+	data.count_total = buffer -> dataArray[buffer -> tail].count_total;
+	data.start_index = buffer -> dataArray[buffer -> tail].start_index;
+
+	// Przesówa wskaźnik na ostatni aktualny element w buforze.
+    buffer->tail = (buffer->tail + 1) % buffer->size;
+
+    return 0;;
+
+}
+
 /*
  * Zapis pojedynczego znaku do bufora kołowego.
  *
@@ -476,6 +542,15 @@ int CircularBufferOccupied(CircularBuffer_t *buffer) {
 		return (buffer -> size - buffer -> tail + buffer -> head);
 	}
 }
+
+int CircularBufferOccupiedRequestArch(CircularBuffer_request *buffer) {
+	if(buffer -> head >= buffer -> tail){
+		return buffer -> head - buffer -> tail;
+	} else {
+		return (buffer -> size - buffer -> tail + buffer -> head);
+	}
+}
+
 // -------------------------W dokumentacji------------------duł
 
 // -------------------------W dokumentacji------------------góra
@@ -725,26 +800,41 @@ int CheckCommandChar(uint8_t chr) {
 void ProcessTxBuffer() {
 
 	__disable_irq();
+	// Sprawdzamy czy transmisja trwa LUB czy bufor nadawczy jest pusty
+	if (tx_in_progress || CircularBufferHasData(&tx_circular_buffer)) {
+		__enable_irq();
+		return;
+	}
+	tx_in_progress = 1;
+	__enable_irq();
 
-    // Wysyłaj kolejne dane tylko jeśli dane są w buforze nadawczym
-    if (tx_in_progress == 0 && CircularBufferHasData(&tx_circular_buffer) == 0) {
+	// Obliczamy wielkość bloku ciągłego który wyślemy z naszego bufora
+	uint16_t bytes_to_send;
+	bytes_to_send = CircularBufferOccupied(&tx_circular_buffer);
+	tx_bytes_sending = bytes_to_send;
 
-    	uint8_t byte;
-    	// Pobieranie danych z bufora nadawczego i ich wysyłąnie
-        if (CircularBufferGetChar(&tx_circular_buffer, &byte) == 0) {
+	/*
+	 * Sprawdzanie czy mój bófor jest zawinięty czy nie i na tej podstawie przypisuje przypisujemy
+	 * odpowiednią wartość do zmiennej.
+	 */
+	if (tx_circular_buffer.tail > tx_circular_buffer.head) {
+		// Obliczanie ile miejsca zostało między ostatnią wartością a końcem tablicy.
+		uint16_t bytes_to_end = tx_circular_buffer.size - tx_circular_buffer.tail;
 
-        	tx_in_progress = 1;
+		// Jeśli chcemy wysłać więcej niż jest dostępne w bloku ciągłym a nie zawiniętym w tablicy to ucinamy,
+		// tak długość bloku wysyłającego by była dopoasowana do jego końca.
+		if (tx_bytes_sending > bytes_to_end) {
+			tx_bytes_sending = bytes_to_end;
+		}
+	}
 
-        	__enable_irq();
-
-        	// Rozpoczęcie transmisji.
-            HAL_UART_Transmit_IT(&huart2, &byte, 1);
-        } else {
-        	__enable_irq();
-        }
-    } else {
-    	__enable_irq();
-    }
+	// Wysyłamy CAŁY blok na raz
+	if (HAL_UART_Transmit_IT(&huart2,
+			&tx_circular_buffer.dataArray[tx_circular_buffer.tail],
+			tx_bytes_sending)
+				!= HAL_OK) {
+		tx_in_progress = 0;
+		}
 }
 
 // -------------------------W dokumentacji------------------duł
@@ -1223,7 +1313,7 @@ void SimulateSensorResponse(uint8_t command, CircularBuffer_t* decoded_data_buff
             QueueFrameForSending(header2, (sizeof(header2)/sizeof(header2[0]))); // Rozpocznij wysyłanie nagłówka
 
             is_manual_measurement = 0; // Wyłączenie manualnego pobierania bieżącej wartości jeśli była włączona.
-            logging_enabled = 1;       // Traktujemy to jako włączenie cyklicznego logowania
+            logging_enabled = 1;       // Włączenie cyklicznego pobierania danych
 
             // Warunek sprawdzajcy czy maszyna stanów jest aktualnie w stanie nie zajętym, by nie kolidować
             // z aktualnie wykonywanymi pomiarami.
@@ -1238,11 +1328,6 @@ void SimulateSensorResponse(uint8_t command, CircularBuffer_t* decoded_data_buff
 
         case '&': // Ustawianie interwału
 
-            // Wysyłanie do pc informacji z mikrokontrolera.
-        	char header3[] = "Odpowiedz: Ustawianie interwalu.";
-
-            QueueFrameForSending(header3, (sizeof(header3)/sizeof(header3[0]))); // Rozpocznij wysyłanie nagłówka
-
             // Zmienna tymczasowa do pobierania wartości z bufora kołowego.
             uint8_t  data = 0;
 
@@ -1256,7 +1341,19 @@ void SimulateSensorResponse(uint8_t command, CircularBuffer_t* decoded_data_buff
             	}
 			}
 
-            logging_interval_ms = interval_ms;
+            if(interval_ms < 80){
+            	char header3[] = "Podano za mały interwał czasowy. Nie można ustawić interwału";
+
+            	// Wpisanie ramki do bufora nadawczego
+            	QueueFrameForSending(header3, (sizeof(header3)/sizeof(header3[0])));
+            } else {
+                // Wysyłanie do pc informacji z mikrokontrolera.
+            	char header3[] = "Odpowiedz: Ustawianie interwalu.";
+            	logging_interval_ms = interval_ms;
+
+            	// Wpisanie ramki do bufora nadawczego
+            	QueueFrameForSending(header3, (sizeof(header3)/sizeof(header3[0])));
+            }
 
             // Uruchamianie wysyłania ramki.
             ProcessTxBuffer();
@@ -1277,9 +1374,6 @@ void SimulateSensorResponse(uint8_t command, CircularBuffer_t* decoded_data_buff
             break;
 
         case '^':
-        	// Rzeby nie nadpisywać danych podczas pobierania wartości
-        	HAL_TIM_Base_Stop_IT(&htim10);
-
         	// Zmienna przechowująca ilość danych jakie mają zostać wysłane do pc
         	uint8_t size_to_sent = 0;
 
@@ -1330,9 +1424,19 @@ void SimulateSensorResponse(uint8_t command, CircularBuffer_t* decoded_data_buff
                 break;
             }
 
-            // Struktura dla mojej maszyny stanów
-            archive_state.count_total = count_to_get;
-            archive_state.start_index = index_start;
+            // Warunek sprawdzający czy w buforz do zapytań są jakieś zapytania do pobrania.
+            /*
+             * Jest ten warunek nam potrzebny ponieważ dzięki temu od razu mamy ustawione aktualne zapytanie
+             * jakie powinniśmy przerabiać.
+             */
+            if(CircularBufferOccupiedRequestArch(&request_circular_buffer) == 0){
+            	archive_current_state.count_total = count_to_get;
+            	archive_current_state.start_index = index_start;
+            } else {
+                // Zapisywanie mojego kolejnego zapytania do mojej struktury
+                PutQueueRequest(&request_circular_buffer, index_start, count_to_get);
+            }
+
             break;
 
         case '*': // Podgląda danych bierzących z czujnika
@@ -1524,7 +1628,12 @@ void AHT15_Process()
 }
 
 void ProcessArchiveTransmission() {
-	if(archive_state.count_total > 0) {
+	if(archive_current_state.count_total > 0) {
+
+		// Jeśli nie ma nic do wysłania, wychodzimy
+		if (archive_current_state.count_total == 0) {
+			return;
+		}
 
 		Measurement_t tempData;
 		uint8_t size_to_sent;
@@ -1541,15 +1650,15 @@ void ProcessArchiveTransmission() {
 		 */
 		int number_of_current_request = 0;
 
-        while (archive_state.count_total != 0) {
-            if (ArchGetDataAtIndex(&history_circular_buffer, archive_state.start_index, &tempData) == 0) {
+        while (archive_current_state.count_total != 0) {
+            if (ArchGetDataAtIndex(&history_circular_buffer, archive_current_state.start_index, &tempData) == 0) {
 
             	char temp_line_buffer[50];
 
             	// Sformułowanie jednej linii do bufora tymczasowego by następnie go wysłać.
             	// Używam funkcji snprintf by przeformatować liczbę na znaki i przekomiować do mojej zmiennej.
             	size_to_sent = snprintf(temp_line_buffer, sizeof(temp_line_buffer),"Pomiar %d: T=%.2f; H=%.2f",
-            			archive_state.start_index, tempData.temperature, tempData.humidity);
+            			archive_current_state.start_index, tempData.temperature, tempData.humidity);
 
                 // Sprawdź, czy dodanie nowej linii przekroczy maksymalny rozmiar danych dla JEDNEJ ramki.
                 if (cargo_len + size_to_sent > SIZE_OF_DANE) {
@@ -1563,8 +1672,8 @@ void ProcessArchiveTransmission() {
                         	 * Odpowiednio zmieniejszanie i powiększanie zmiennych by
                         	 * powturzyły jeszcze raz odczyty które nie załapały się na wysłanie.
                         	 */
-                        	archive_state.start_index -= number_of_current_request;
-                        	archive_state.count_total += number_of_current_request;
+                        	archive_current_state.start_index -= number_of_current_request;
+                        	archive_current_state.count_total += number_of_current_request;
                         }
 
                 		return;
@@ -1591,12 +1700,12 @@ void ProcessArchiveTransmission() {
                 number_of_current_request++;
 
                 cargo_len += size_to_sent;
-                archive_state.start_index++;
-                archive_state.count_total--;
+                archive_current_state.start_index++;
+                archive_current_state.count_total--;
             }
         }
 
-        // Po wyjściu z pętli w cargo_buffer mogą być resztki danych.
+        // Po wyjściu z pętli w cargo_buffer mogą być resztki danych które powinniśmy wysłać.
         if (cargo_len > 0) {
         	// Próbujemy wysłać teraz dane.
             if (QueueFrameForSending(cargo_buffer, cargo_len) != 0) {
@@ -1605,23 +1714,20 @@ void ProcessArchiveTransmission() {
                 ProcessTxBuffer();
 
                 // Cofamy liczniki, żeby spróbować wysłać tę końcówkę w następnym obiegu
-                archive_state.start_index -= number_of_current_request;
-                archive_state.count_total += number_of_current_request;
+                archive_current_state.start_index -= number_of_current_request;
+                archive_current_state.count_total += number_of_current_request;
                 return;
             }
         }
 
-        // Zawsze na końcu upewniamy się, że transmisja UART działa by tym samym wysłać dane które zostały zapisane
-        // ale ich jeszcze nie wysłano
+        // Wysyłanie danych przez usart.
         ProcessTxBuffer();
 	}
 
-    // Warunek sprawdzający czy aby na pewno pobrano wszystkie odpowiednie pomiary.
-    if (archive_state.count_total == 0) {
-         // Warunek sprawdzajćy czy jest włączone pobieranie pomiarów cykliczne by włączyć pobieranie pomiarów
-         if (logging_enabled) {
-             HAL_TIM_Base_Start_IT(&htim10);
-         }
+    // Warunek sprawdzający czy aby na pewno pobrano wszystkie odpowiednie pomiary. I zmienienie na odczyt
+	// kolejnego zapytania.
+    if (archive_current_state.count_total == 0) {
+    	GetQueueRequest(&request_circular_buffer, archive_current_state);
     }
 }
 
@@ -2332,15 +2438,13 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 // zostanie wysłana.
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
     if (huart == &huart2) {
-        uint8_t data_to_send;
-        // Pobieraj dane z GŁÓWNEGO bufora TX
-        if (CircularBufferGetChar(&tx_circular_buffer, &data_to_send) == 0) {
-            // Jeśli są dane, kontynuuj wysyłanie
-            HAL_UART_Transmit_IT(&huart2, &data_to_send, 1);
-        } else {
-            // Jeśli bufor jest pusty, zakończ transmisję i ustaw flagę że nie są wysyłanie żadne wartości
-            tx_in_progress = 0;
-        }
+    	// Przesuwamy ogon o liczbę wysłąnych bajtów.
+    	tx_circular_buffer.tail = (tx_circular_buffer.tail + tx_bytes_sending) % tx_circular_buffer.size;
+
+    	tx_in_progress = 0;
+
+    	// Sprawdzamy czy jest coś jeszcze do wysłania (np. reszta po zawinięciu)
+    	ProcessTxBuffer();
     }
 }
 
