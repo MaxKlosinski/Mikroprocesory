@@ -177,6 +177,14 @@ uint8_t is_manual_measurement = 0;
 // Definicja stanów dla maszyny stanów obsługującej czujnik AHT15
 typedef enum {
     AHT15_STATE_IDLE,                 // Stan bezczynności, brak operacji
+	AHT15_STATE_SOFT_RESET, 		  // Stan gdzie jest wykonywany soft reset
+	/*
+	 * Jest to stan który jest odpowiedzialny za powiadomienie timera że jest teras stan oczekiwania
+	 * na wykonanie się soft reset. Nie mogę zrobić tego zwyczajnie na stanie AHT15_STATE_IDLE ponieważ
+	 * jest to stan zbyt ogólny i mój timer nie będzie wiedział tym samym czy to jest stan bezczynności
+	 * czy oczekiwania na coś.
+	 */
+	AHT15_STATE_WAIT_FOR_RESET,
     AHT15_STATE_INIT_SEND_CMD,        // Wysłanie komendy inicjalizacyjnej
     AHT15_STATE_INIT_DONE,            // Inicjalizacja zakończona, wyślij odpowiedź
     AHT15_STATE_MEASURE_SEND_CMD,     // Wysłanie komendy rozpoczęcia pomiaru
@@ -1559,7 +1567,7 @@ void AHT15_Process()
                     i2c_busy_flag = 0;
                     aht15_current_state = AHT15_STATE_ERROR;
                 } else {
-                    aht15_current_state = AHT15_STATE_PROCESS_DATA;
+                	aht15_current_state = AHT15_STATE_PROCESS_DATA;
                 }
         	}else{
         		aht15_current_state = AHT15_STATE_IDLE;
@@ -1571,12 +1579,25 @@ void AHT15_Process()
         case AHT15_STATE_PROCESS_DATA:
         {
             if (logging_enabled == 1 || is_manual_measurement == 1) {
+
+            	// Warunek sprawdzający bit stanu czujnika, czy nie jest czujnik zajęty.
+            	// Sprawdzenie ZAJĘTOŚCI (Bit 7 / 0x80)
                 if ((sensor_data_buffer[0] & 0x80) != 0) {
                      if (is_manual_measurement == 1) {
                     	 snprintf(response_text, sizeof(response_text), "Blad: Czujnik AHT15 jest wciaz zajety.");
                      }
                      // Jeśli błąd wystąpił przy pomiarze cyklicznym, po prostu go ignorujemy.
                      // Bo jak jeden pomiar się nie wykona z powodu zajętości to nic nie szkodzi w pomiarze cyklicznym.
+
+                } else if ((sensor_data_buffer[0] & 0x08) == 0) {
+                	// Bit 3 wynosi 0 -> Czujnik utracił kalibrację więc wykonujemy soft reset
+                	if (is_manual_measurement == 1) {
+                		snprintf(response_text, sizeof(response_text), "Blad: Brak kalibracji. Ponawianie inicjalizacji...");
+                	}
+
+                	// Przejście do ponownej inicjalizacji czujnika
+                	aht15_current_state = AHT15_STATE_SOFT_RESET;
+                	break;
                 } else {
                      /*
                       * Wyłuskiwanie pomiarów z bajtów zgodnie z schematem zawartym w dokumentacji.
@@ -1607,6 +1628,22 @@ void AHT15_Process()
             aht15_current_state = AHT15_STATE_IDLE;
             break;
         }
+
+        case AHT15_STATE_SOFT_RESET:
+        	i2c_busy_flag = 1;
+
+        	// Komenda resetu
+        	static uint8_t soft_reset_cmd = 0xBA;
+
+        	if (HAL_I2C_Master_Transmit_IT(&hi2c1, AHT15_ADDRESS, &soft_reset_cmd, 1) != HAL_OK) {
+        		i2c_busy_flag = 0;
+        		aht15_current_state = AHT15_STATE_ERROR;
+        	} else {
+        		// Po udanym wysłaniu resetu, następnym krokiem będzie ponowna inicjalizacja czujnika.
+        		// Która nastąpi po poprawnej odbytej transmisji do czujnika.
+        		aht15_current_state = AHT15_STATE_WAIT_FOR_RESET;
+        	}
+        	break;
 
         case AHT15_STATE_ERROR:
 
@@ -2474,7 +2511,11 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 	// Sprawdź, czy przerwanie pochodzi od TIM3 (timer oczekiwania na wykonanie pomiaru)
 	else if (htim->Instance == TIM3)
 	{
-		aht15_current_state = AHT15_STATE_MEASURE_READ_DATA;
+		if(aht15_current_state == AHT15_STATE_WAIT_FOR_RESET){
+			aht15_current_state = AHT15_STATE_INIT_SEND_CMD;
+		} else {
+			aht15_current_state = AHT15_STATE_MEASURE_READ_DATA;
+		}
 
 		// Zatrzymaj timer, aby nie generował kolejnych przerwań bez potrzeby
 		HAL_TIM_Base_Stop_IT(&htim3);
@@ -2490,6 +2531,8 @@ void HAL_I2C_MasterTxCpltCallback(I2C_HandleTypeDef *hi2c)
         i2c_error_flag = 0;
 
         if (logging_enabled || is_manual_measurement) {
+
+        	// Rozpoczęcie timera który odczeka czas potrzebny na zaimplementowanie komendy.
              __HAL_TIM_SET_COUNTER(&htim3, 0);
              HAL_TIM_Base_Start_IT(&htim3);
         }
