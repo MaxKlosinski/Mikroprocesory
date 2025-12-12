@@ -118,10 +118,13 @@ UART_HandleTypeDef huart2;
 // -------------------------W dokumentacji------------------góra
 // Definicja struktury przechowującej pojedynczy pomiar
 typedef struct {
-
 	// Typem danych musi być float ponieważ czujnik pobiera wartości z dużą dokładnością po przecinku.
     float temperature;
     float humidity;
+
+    // Jest to zmienna która będzie służyła do informowania dokładnie które to jest miejsce
+    // zajmowane w tablicy historycznej.
+    uint16_t index_in_history;
 } Measurement_t;
 
 // -------------------------W dokumentacji------------------duł
@@ -157,7 +160,7 @@ ArchiveState archive_current_state;
 
 // -------------------------W dokumentacji------------------góra
 // Zmienne do zarządzania cyklicznym pobieraniem danych
-volatile uint32_t logging_interval_ms = 0; // Zmienna przechowująca interwał w milisekundach
+uint32_t logging_interval_ms = 0; // Zmienna przechowująca interwał w milisekundach
 
 // Flaga informująca o tym czy włączono cykliczne pobieranie.
 // Jest to ważne ponieważ mamy dwa tryby odbierania danych. PIerwszy to tryb ręcznego pobierania aktualnej
@@ -302,6 +305,8 @@ uint8_t frame_timeout_flag = 0;
 // stanie podjądź odpowiednie działania dla przepełnienia bufora.
 uint8_t rx_overflow_flag = 0;
 
+int ArchPutData_index = 0;
+
 int CALC_B64_LEN(int n) {
 	return ((((n) + 2) / 3) * 4);
 }
@@ -329,6 +334,13 @@ int ArchPutData(CircularBuffer_arch *buffer, float temperature, float humanity)
 
 	data.temperature = temperature;
 	data.humidity = humanity;
+	data.index_in_history = ArchPutData_index;
+
+	if(ArchPutData_index >= HISTORY_BUFFER_SIZE){
+		ArchPutData_index = 0;
+	} else {
+		ArchPutData_index++;
+	}
 
 	// Przypisywanie do zmiennej następny indeks head.
 	// Wykonujemy obliczenia z modulo żeby przez rozmiar bufora
@@ -1350,7 +1362,7 @@ void SimulateSensorResponse(uint8_t command, CircularBuffer_t* decoded_data_buff
 			}
 
             if(interval_ms < 80){
-            	char header3[] = "Podano za mały interwał czasowy. Nie można ustawić interwału";
+            	char header3[] = "Podano za mały interwał czasowy. Nie można ustawić interwału.";
 
             	// Wpisanie ramki do bufora nadawczego
             	QueueFrameForSending(header3, (sizeof(header3)/sizeof(header3[0])));
@@ -1456,11 +1468,11 @@ void SimulateSensorResponse(uint8_t command, CircularBuffer_t* decoded_data_buff
 
         case '@':
 
-        	char header8[100];
+        	char header8[10];
 
-            size_to_sent = snprintf(header8, sizeof(header8), "Ustawiony interwal jest na podana liczbe %" PRIu32 " ms", logging_interval_ms);
+        	memcpy(&header8[0], &logging_interval_ms, 4);
 
-            QueueFrameForSending(header8, size_to_sent);
+            QueueFrameForSending(header8, 4);
 
             // Uruchamianie wysyłania ramki.
             ProcessTxBuffer();
@@ -1612,8 +1624,14 @@ void AHT15_Process()
                      float temperature = ((float)raw_temperature / 1048576.0) * 200.0 - 50.0;
 
                      if (is_manual_measurement == 1) {
-                         // Jeśli to pomiar na żądanie, wyślij wynik przez UART
-                         snprintf(response_text, sizeof(response_text), "Odpowiedz: T=%.2f C, H=%.2f %%", temperature, humidity);
+
+                    	 // Liczba sugerująca że pomiar był wykonany ręcznie.
+                    	 uint16_t index_in_history = 5000;
+
+                    	 memcpy(&response_text[0], &temperature, 4);
+                    	 memcpy(&response_text[4], &humidity, 4);
+                    	 memcpy(&response_text[8], &index_in_history, 2);
+
                      } else {
                          // W przeciwnym wypadku (pomiar cykliczny), zapisz do historii
                          ArchPutData(&history_circular_buffer, temperature, humidity);
@@ -1623,6 +1641,14 @@ void AHT15_Process()
                 // Wyzeruj flagę pomiaru ręcznego po jego obsłużeniu
                 if (is_manual_measurement == 1) {
                     is_manual_measurement = 0;
+
+                    QueueFrameForSending(response_text, 10);
+
+                    // Uruchamianie wysyłania ramki.
+                    ProcessTxBuffer();
+
+                    aht15_current_state = AHT15_STATE_IDLE;
+                    return;
                 }
             }
             aht15_current_state = AHT15_STATE_IDLE;
@@ -1673,7 +1699,7 @@ void ProcessArchiveTransmission() {
 		}
 
 		Measurement_t tempData;
-		uint8_t size_to_sent;
+		uint8_t size_to_sent = 0;
 		char cargo_buffer[SIZE_OF_DANE];
 		int cargo_len = 0;
 
@@ -1690,12 +1716,13 @@ void ProcessArchiveTransmission() {
         while (archive_current_state.count_total != 0) {
             if (ArchGetDataAtIndex(&history_circular_buffer, archive_current_state.start_index, &tempData) == 0) {
 
-            	char temp_line_buffer[50];
+            	uint8_t temp_line_buffer[50];
 
-            	// Sformułowanie jednej linii do bufora tymczasowego by następnie go wysłać.
-            	// Używam funkcji snprintf by przeformatować liczbę na znaki i przekomiować do mojej zmiennej.
-            	size_to_sent = snprintf(temp_line_buffer, sizeof(temp_line_buffer),"Pomiar %d: T=%.2f; H=%.2f",
-            			archive_current_state.start_index, tempData.temperature, tempData.humidity);
+            	memcpy(&temp_line_buffer[0], &tempData.temperature, 4);
+            	memcpy(&temp_line_buffer[4], &tempData.humidity, 4);
+            	memcpy(&temp_line_buffer[8], &tempData.index_in_history, 2);
+
+            	size_to_sent += 10;
 
                 // Sprawdź, czy dodanie nowej linii przekroczy maksymalny rozmiar danych dla JEDNEJ ramki.
                 if (cargo_len + size_to_sent > SIZE_OF_DANE) {
