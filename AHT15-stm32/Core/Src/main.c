@@ -895,7 +895,7 @@ int my_isalnum(int c) {
  * cargo -> które ma za cal przechowywać zawartość wartości która ma zostać przesłana
  * cargo_len -> zmienna przechowująca długość zmiennej cargo która ma zostać wysłana
  */
-int QueueFrameForSending(const char* cargo, uint8_t cargo_len) {
+int QueueFrameForSending(const char* cargo, uint8_t cargo_len, uint8_t response_command) {
     if (cargo_len == 0 || cargo_len > SIZE_OF_DANE) {
         // Obsługa błędu - pusty lub za długi ładunek (przekraczający 99 bajtów)
         return -1;
@@ -923,7 +923,7 @@ int QueueFrameForSending(const char* cargo, uint8_t cargo_len) {
     uint8_t decoded_block[4 + SIZE_OF_DANE];
     decoded_block[0] = '?'; // Nadawca MC
     decoded_block[1] = sender; // Odbiorca PC
-    decoded_block[2] = 'G'; // Komenda (odpowiedź ogólna)
+    decoded_block[2] = response_command; // Komenda (odpowiedź ogólna)
     decoded_block[3] = cargo_len;
 
     /*
@@ -996,7 +996,7 @@ int Base64Decode(uint8_t* data, int data_sz) {
             // Wysyłanie do pc informacji z mikrokontrolera.
             char header1[] = "Odpowiedz: Znak padding = występuje w środku kodowania base64";
 
-            QueueFrameForSending(header1, (sizeof(header1)/sizeof(header1[0]))); // Rozpocznij wysyłanie nagłówka
+            QueueFrameForSending(header1, (sizeof(header1)/sizeof(header1[0])), 'G'); // Rozpocznij wysyłanie nagłówka
 
             // Uruchamianie wysyłania ramki.
             ProcessTxBuffer();
@@ -1010,7 +1010,7 @@ int Base64Decode(uint8_t* data, int data_sz) {
         // Wysyłanie do pc informacji z mikrokontrolera.
         char header1[] = "Odpowiedz: Znak padding = występuje ma błędne miejsce gdzieś na koncu.";
 
-        QueueFrameForSending(header1, (sizeof(header1)/sizeof(header1[0]))); // Rozpocznij wysyłanie nagłówka
+        QueueFrameForSending(header1, (sizeof(header1)/sizeof(header1[0])), 'G'); // Rozpocznij wysyłanie nagłówka
 
         // Uruchamianie wysyłania ramki.
         ProcessTxBuffer();
@@ -1330,7 +1330,7 @@ void SimulateSensorResponse(uint8_t command, CircularBuffer_t* decoded_data_buff
             // Wysyłanie do pc informacji z mikrokontrolera.
             char header2[] = "Odpowiedz: Włączenie pomiaru cyklicznego.";
 
-            QueueFrameForSending(header2, (sizeof(header2)/sizeof(header2[0]))); // Rozpocznij wysyłanie nagłówka
+            QueueFrameForSending(header2, (sizeof(header2)/sizeof(header2[0])), '$'); // Rozpocznij wysyłanie nagłówka
 
             is_manual_measurement = 0; // Wyłączenie manualnego pobierania bieżącej wartości jeśli była włączona.
             logging_enabled = 1;       // Włączenie cyklicznego pobierania danych
@@ -1365,14 +1365,14 @@ void SimulateSensorResponse(uint8_t command, CircularBuffer_t* decoded_data_buff
             	char header3[] = "Podano za mały interwał czasowy. Nie można ustawić interwału.";
 
             	// Wpisanie ramki do bufora nadawczego
-            	QueueFrameForSending(header3, (sizeof(header3)/sizeof(header3[0])));
+            	QueueFrameForSending(header3, (sizeof(header3)/sizeof(header3[0])), 'G');
             } else {
                 // Wysyłanie do pc informacji z mikrokontrolera.
             	char header3[] = "Odpowiedz: Ustawianie interwalu.";
             	logging_interval_ms = interval_ms;
 
             	// Wpisanie ramki do bufora nadawczego
-            	QueueFrameForSending(header3, (sizeof(header3)/sizeof(header3[0])));
+            	QueueFrameForSending(header3, (sizeof(header3)/sizeof(header3[0])), '&');
             }
 
             // Uruchamianie wysyłania ramki.
@@ -1385,7 +1385,7 @@ void SimulateSensorResponse(uint8_t command, CircularBuffer_t* decoded_data_buff
             // Wysyłanie do pc informacji z mikrokontrolera.
         	char header4[] = "Odpowiedz: Zakończenie pobierania co interwał";
 
-            QueueFrameForSending(header4, (sizeof(header4)/sizeof(header4[0]))); // Rozpocznij wysyłanie nagłówka
+            QueueFrameForSending(header4, (sizeof(header4)/sizeof(header4[0])), '%'); // Rozpocznij wysyłanie nagłówka
 
             // Uruchamianie wysyłania ramki.
             ProcessTxBuffer();
@@ -1436,7 +1436,7 @@ void SimulateSensorResponse(uint8_t command, CircularBuffer_t* decoded_data_buff
 
                 snprintf(header6, size_to_sent, "Blad: Zadany zakres (%d, %d) jest nieprawidlowy. Dostepnych pomiarow: %d.", index_start, count_to_get, occupied);
 
-                QueueFrameForSending(header6, size_to_sent);
+                QueueFrameForSending(header6, size_to_sent, 'G');
 
                 // Uruchamianie wysyłania ramki.
                 ProcessTxBuffer();
@@ -1472,7 +1472,7 @@ void SimulateSensorResponse(uint8_t command, CircularBuffer_t* decoded_data_buff
 
         	memcpy(&header8[0], &logging_interval_ms, 4);
 
-            QueueFrameForSending(header8, 4);
+            QueueFrameForSending(header8, 4, '@');
 
             // Uruchamianie wysyłania ramki.
             ProcessTxBuffer();
@@ -1521,10 +1521,17 @@ void AHT15_Process()
     	response_text[var] = '\0';
 	}
 
+    // Komenda jaka zostanie wysłana.
+    uint8_t response_command = '\0';
+
     switch (aht15_current_state)
     {
         case AHT15_STATE_IDLE: // Stan bezczynności dla czujnika.
             // Nic do zrobienia, czekamy na nowe polecenie
+            break;
+
+        case AHT15_STATE_WAIT_FOR_RESET: // Stan oczekiwania na lekki reset dla czujnika.
+            // Nic do zrobienia, czekamy na wykonanie resetu
             break;
 
         case AHT15_STATE_INIT_SEND_CMD: // Sekcja inicjalizacji czujnika
@@ -1536,6 +1543,7 @@ void AHT15_Process()
                 aht15_current_state = AHT15_STATE_ERROR;
 
             	snprintf(response_text, sizeof(response_text), "Odpowiedz: Czujnik AHT15 NIE poprawnie zainicjalizowany.");
+            	response_command = 'G';
             } else {
                 aht15_current_state = AHT15_STATE_INIT_DONE;
             }
@@ -1546,6 +1554,7 @@ void AHT15_Process()
         {
             // Ten stan jest wykonywany, gdy transmisja I2C się zakończy
         	snprintf(response_text, sizeof(response_text), "Odpowiedz: Czujnik AHT15 poprawnie zainicjalizowany.");
+        	response_command = '!';
             aht15_current_state = AHT15_STATE_IDLE; // Wracanie do stanu bezczynności.
             break;
         }
@@ -1597,6 +1606,7 @@ void AHT15_Process()
                 if ((sensor_data_buffer[0] & 0x80) != 0) {
                      if (is_manual_measurement == 1) {
                     	 snprintf(response_text, sizeof(response_text), "Blad: Czujnik AHT15 jest wciaz zajety.");
+                    	 response_command = 'G';
                      }
                      // Jeśli błąd wystąpił przy pomiarze cyklicznym, po prostu go ignorujemy.
                      // Bo jak jeden pomiar się nie wykona z powodu zajętości to nic nie szkodzi w pomiarze cyklicznym.
@@ -1605,9 +1615,11 @@ void AHT15_Process()
                 	// Bit 3 wynosi 0 -> Czujnik utracił kalibrację więc wykonujemy soft reset
                 	if (is_manual_measurement == 1) {
                 		snprintf(response_text, sizeof(response_text), "Blad: Brak kalibracji. Ponawianie inicjalizacji...");
+                		response_command = 'G';
                 	}
 
-                	// Przejście do ponownej inicjalizacji czujnika
+                	// Przejście do ponownej inicjalizacji czujnika, ale przed inicjalizacją to nastąpi
+                	// lekki reset czujnika.
                 	aht15_current_state = AHT15_STATE_SOFT_RESET;
                 	break;
                 } else {
@@ -1615,7 +1627,7 @@ void AHT15_Process()
                       * Wyłuskiwanie pomiarów z bajtów zgodnie z schematem zawartym w dokumentacji.
                       */
                 	uint32_t raw_humidity = ((uint32_t)(sensor_data_buffer[1] << 12)) | ((uint32_t)(sensor_data_buffer[2] << 4)) | ((uint32_t)(sensor_data_buffer[3] >> 4));
-                     uint32_t raw_temperature = ((uint32_t)((sensor_data_buffer[3] & 0x0F) << 16)) | ((uint32_t)(sensor_data_buffer[4] << 8)) | ((uint32_t)sensor_data_buffer[5]);
+                	uint32_t raw_temperature = ((uint32_t)((sensor_data_buffer[3] & 0x0F) << 16)) | ((uint32_t)(sensor_data_buffer[4] << 8)) | ((uint32_t)sensor_data_buffer[5]);
 
                      /*
                       * Konwersja na tym zmiennoprzecinkowy.
@@ -1642,11 +1654,14 @@ void AHT15_Process()
                 if (is_manual_measurement == 1) {
                     is_manual_measurement = 0;
 
-                    QueueFrameForSending(response_text, 10);
+                    response_command = '*';
+
+                    QueueFrameForSending(response_text, 10, response_command);
 
                     // Uruchamianie wysyłania ramki.
                     ProcessTxBuffer();
 
+                    // Zerowanie stanu czujnika.
                     aht15_current_state = AHT15_STATE_IDLE;
                     return;
                 }
@@ -1674,6 +1689,7 @@ void AHT15_Process()
         case AHT15_STATE_ERROR:
 
         	snprintf(response_text, sizeof(response_text), "Blad I2C: Blad, kod: %lu", i2c_error_code);
+        	response_command = 'G';
 
             i2c_error_code = HAL_I2C_ERROR_NONE; // Wyzeruj kod błędu po obsłużeniu
             aht15_current_state = AHT15_STATE_IDLE; // Zresetuj stan po błędzie
@@ -1683,7 +1699,7 @@ void AHT15_Process()
 
     // Wysyłanie danych które zostały zapisane w zmiennej
     if (response_text[0] != '\0') {
-        QueueFrameForSending(response_text, sizeof(response_text));
+        QueueFrameForSending(response_text, sizeof(response_text), response_command);
 
         // Uruchamianie wysyłania ramki.
         ProcessTxBuffer();
@@ -1727,7 +1743,7 @@ void ProcessArchiveTransmission() {
                 // Sprawdź, czy dodanie nowej linii przekroczy maksymalny rozmiar danych dla JEDNEJ ramki.
                 if (cargo_len + size_to_sent > SIZE_OF_DANE) {
                 	// Warunek sprawdzajądy czy zmieści się ładunek do bufora kołowego.
-                	if(QueueFrameForSending(cargo_buffer, cargo_len) != 0){
+                	if(QueueFrameForSending(cargo_buffer, cargo_len, '^') != 0){
                         // Uruchamianie wysyłania ramki.
                         ProcessTxBuffer();
 
@@ -1772,7 +1788,7 @@ void ProcessArchiveTransmission() {
         // Po wyjściu z pętli w cargo_buffer mogą być resztki danych które powinniśmy wysłać.
         if (cargo_len > 0) {
         	// Próbujemy wysłać teraz dane.
-            if (QueueFrameForSending(cargo_buffer, cargo_len) != 0) {
+            if (QueueFrameForSending(cargo_buffer, cargo_len, '^') != 0) {
 
                 // Jeśli nie ma miejsca na ostatnią ramkę to wysyłamy resztki.
                 ProcessTxBuffer();
@@ -1950,7 +1966,7 @@ int main(void)
 		  	            // Wysyłanie do pc informacji z mikrokontrolera.
 		  	            char header1[] = "Odpowiedz: Podany warunek nie spełnia minimalnej wielkości ramki";
 
-		  	            QueueFrameForSending(header1, (sizeof(header1)/sizeof(header1[0]))); // Rozpocznij wysyłanie nagłówka
+		  	            QueueFrameForSending(header1, (sizeof(header1)/sizeof(header1[0])), 'G'); // Rozpocznij wysyłanie nagłówka
 
 		  	            // Uruchamianie wysyłania ramki.
 		  	            ProcessTxBuffer();
@@ -1981,7 +1997,7 @@ int main(void)
 	  		            // Wysyłanie do pc informacji z mikrokontrolera.
 	  		            char header1[] = "Odpowiedz: Zakodowana wartość nie jest wielokrotnością 4.";
 
-	  		            QueueFrameForSending(header1, (sizeof(header1)/sizeof(header1[0]))); // Rozpocznij wysyłanie nagłówka
+	  		            QueueFrameForSending(header1, (sizeof(header1)/sizeof(header1[0])), 'G'); // Rozpocznij wysyłanie nagłówka
 
 	  		            // Uruchamianie wysyłania ramki.
 	  		            ProcessTxBuffer();
@@ -2006,7 +2022,7 @@ int main(void)
 		  		            // Wysyłanie do pc informacji z mikrokontrolera.
 		  		            char header1[] = "Odpowiedz: Źle zakodowano dane w base64.";
 
-		  		            QueueFrameForSending(header1, (sizeof(header1)/sizeof(header1[0]))); // Rozpocznij wysyłanie nagłówka
+		  		            QueueFrameForSending(header1, (sizeof(header1)/sizeof(header1[0])), 'G'); // Rozpocznij wysyłanie nagłówka
 
 		  		            // Uruchamianie wysyłania ramki.
 		  		            ProcessTxBuffer();
@@ -2035,7 +2051,7 @@ int main(void)
 			  		            // Wysyłanie do pc informacji z mikrokontrolera.
 			  		            char header1[] = "Odpowiedz: Nie poprawne znaki w CRC";
 
-			  		            QueueFrameForSending(header1, (sizeof(header1)/sizeof(header1[0]))); // Rozpocznij wysyłanie nagłówka
+			  		            QueueFrameForSending(header1, (sizeof(header1)/sizeof(header1[0])), 'G'); // Rozpocznij wysyłanie nagłówka
 
 			  		            // Uruchamianie wysyłania ramki.
 			  		            ProcessTxBuffer();
@@ -2058,7 +2074,7 @@ int main(void)
 				  	            // Wysyłanie do pc informacji z mikrokontrolera.
 				  	            char header1[] = "Odpowiedz: Nie można poprawnie zdekodować danych z base64";
 
-				  	            QueueFrameForSending(header1, (sizeof(header1)/sizeof(header1[0]))); // Rozpocznij wysyłanie nagłówka
+				  	            QueueFrameForSending(header1, (sizeof(header1)/sizeof(header1[0])), 'G'); // Rozpocznij wysyłanie nagłówka
 
 				  	            // Uruchamianie wysyłania ramki.
 				  	            ProcessTxBuffer();
@@ -2113,7 +2129,7 @@ int main(void)
 	                        // Wysyłanie do pc informacji z mikrokontrolera.
 	                        char header1[] = "Odpowiedz: Nie poprawna komenda";
 
-	                        QueueFrameForSending(header1, (sizeof(header1)/sizeof(header1[0]))); // Rozpocznij wysyłanie nagłówka
+	                        QueueFrameForSending(header1, (sizeof(header1)/sizeof(header1[0])), 'G'); // Rozpocznij wysyłanie nagłówka
 
 	                        // Uruchamianie wysyłania ramki.
 	                        ProcessTxBuffer();
@@ -2134,7 +2150,7 @@ int main(void)
                             // Wysyłanie do pc informacji z mikrokontrolera.
                             char header1[] = "Odpowiedz: Pole długość danych nie zgadza się z polem dane.";
 
-                            QueueFrameForSending(header1, (sizeof(header1)/sizeof(header1[0]))); // Rozpocznij wysyłanie nagłówka
+                            QueueFrameForSending(header1, (sizeof(header1)/sizeof(header1[0])), 'G'); // Rozpocznij wysyłanie nagłówka
 
                             // Uruchamianie wysyłania ramki.
                             ProcessTxBuffer();
@@ -2176,7 +2192,7 @@ int main(void)
 
 	                      } else {
 	                    	    // Błąd CRC!
-	                    	    QueueFrameForSending("Blad: Nieprawidlowa suma kontrolna CRC.", sizeof("Blad: Nieprawidlowa suma kontrolna CRC."));
+	                    	    QueueFrameForSending("Blad: Nieprawidlowa suma kontrolna CRC.", sizeof("Blad: Nieprawidlowa suma kontrolna CRC."), 'G');
 
 	                            // Uruchamianie wysyłania ramki.
 	                            ProcessTxBuffer();
@@ -2538,6 +2554,9 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 	// Sprawdź, czy przerwanie pochodzi od TIM3 (timer oczekiwania na wykonanie pomiaru)
 	else if (htim->Instance == TIM3)
 	{
+		/*
+		 * Jest to warunek sprawdzający czy już upłyną czas potrzebny na lekki reset czujnika.
+		 */
 		if(aht15_current_state == AHT15_STATE_WAIT_FOR_RESET){
 			aht15_current_state = AHT15_STATE_INIT_SEND_CMD;
 		} else {
