@@ -413,6 +413,16 @@ int ArchGetDataAtIndex(CircularBuffer_arch *buffer, int index, Measurement_t *da
     return 0;
 }
 
+// Odczytuje dane z bufora archiwalnego o podanym FIZYCZNYM indeksie
+// (ignoruje pozycję tail/head, jedynie sprawdza zakres tablicy)
+int ArchGetDataAtPhysicalIndex(CircularBuffer_arch *buffer, int physical_index, Measurement_t *data) {
+    if (physical_index < 0 || physical_index >= buffer->size) {
+        return -1; // Indeks poza zakresem tablicy
+    }
+    *data = buffer->dataArray[physical_index];
+    return 0;
+}
+
 // -------------------------W dokumentacji------------------góra
 
 // Funkcja pobierająca zapytania do pobierania komend od czujnika
@@ -1449,12 +1459,20 @@ void SimulateSensorResponse(uint8_t command, CircularBuffer_t* decoded_data_buff
              * Jest ten warunek nam potrzebny ponieważ dzięki temu od razu mamy ustawione aktualne zapytanie
              * jakie powinniśmy przerabiać.
              */
+
+            // Obliczamy fizyczny indeks startowy w momencie przyjęcia zgłoszenia.
+            // Dzięki temu nawet jak bufor zostanie nadpisany, my będziemy czytać
+            // z tych samych komórek pamięci (co prawda z nowymi danymi, ale zachowując ciągłość).
+            // A jeśli bufor nie zostanie nadpisany, to odczytamy dokładnie te dane, o które chodziło,
+            // niezależnie od przesunięcia 'tail'.
+            int physical_start_index = (history_circular_buffer.tail + index_start) % history_circular_buffer.size;
+
             if(CircularBufferOccupiedRequestArch(&request_circular_buffer) == 0){
             	archive_current_state.count_total = count_to_get;
-            	archive_current_state.start_index = index_start;
+		archive_current_state.start_index = physical_start_index;
             } else {
                 // Zapisywanie mojego kolejnego zapytania do mojej struktury
-                PutQueueRequest(&request_circular_buffer, index_start, count_to_get);
+                PutQueueRequest(&request_circular_buffer, physical_start_index, count_to_get);
             }
 
             break;
@@ -1730,7 +1748,8 @@ void ProcessArchiveTransmission() {
 		int number_of_current_request = 0;
 
         while (archive_current_state.count_total != 0) {
-            if (ArchGetDataAtIndex(&history_circular_buffer, archive_current_state.start_index, &tempData) == 0) {
+            // Używamy indeksu fizycznego z funkcją ArchGetDataAtPhysicalIndex
+            if (ArchGetDataAtPhysicalIndex(&history_circular_buffer, archive_current_state.start_index, &tempData) == 0) {
 
             	uint8_t temp_line_buffer[50];
 
@@ -1752,7 +1771,10 @@ void ProcessArchiveTransmission() {
                         	 * Odpowiednio zmieniejszanie i powiększanie zmiennych by
                         	 * powturzyły jeszcze raz odczyty które nie załapały się na wysłanie.
                         	 */
-                        	archive_current_state.start_index -= number_of_current_request;
+                            // Cofanie indeksu z uwzględnieniem modulo
+                            int rewind = number_of_current_request;
+                            int size = history_circular_buffer.size;
+                            archive_current_state.start_index = (archive_current_state.start_index - rewind + size) % size;
                         	archive_current_state.count_total += number_of_current_request;
                         }
 
@@ -1780,7 +1802,9 @@ void ProcessArchiveTransmission() {
                 number_of_current_request++;
 
                 cargo_len += size_to_sent;
-                archive_current_state.start_index++;
+
+                // Inkrementacja modulo rozmiar bufora (indeks fizyczny)
+                archive_current_state.start_index = (archive_current_state.start_index + 1) % history_circular_buffer.size;
                 archive_current_state.count_total--;
             }
         }
@@ -1794,7 +1818,10 @@ void ProcessArchiveTransmission() {
                 ProcessTxBuffer();
 
                 // Cofamy liczniki, żeby spróbować wysłać tę końcówkę w następnym obiegu
-                archive_current_state.start_index -= number_of_current_request;
+                // Cofanie indeksu z uwzględnieniem modulo
+                int rewind = number_of_current_request;
+                int size = history_circular_buffer.size;
+                archive_current_state.start_index = (archive_current_state.start_index - rewind + size) % size;
                 archive_current_state.count_total += number_of_current_request;
                 return;
             }
